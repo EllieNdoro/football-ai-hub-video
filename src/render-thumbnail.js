@@ -1,4 +1,4 @@
-// Thumbnail rendering: fetch AI image from Pollinations, overlay big bold text.
+// Thumbnail rendering: try Pollinations AI, fall back to programmatic gradient on error.
 const { createCanvas, loadImage, registerFont } = require('canvas');
 const fs = require('fs');
 const path = require('path');
@@ -10,18 +10,46 @@ async function renderThumbnail({ workDir, prompt, overlayText, composition }) {
   const H = isShort ? 1920 : 720;
   const outPath = path.join(workDir, 'thumb.jpg');
 
-  const enhanced = `${prompt}, cinematic, dramatic lighting, sports photography, 4k, high contrast`;
-  const seed = Math.floor(Math.random() * 100000);
-  const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(enhanced)}?width=${W}&height=${H}&nologo=true&seed=${seed}`;
-
-  const resp = await axios.get(url, { responseType: 'arraybuffer', timeout: 90000 });
-  const baseImg = await loadImage(Buffer.from(resp.data));
-
   const canvas = createCanvas(W, H);
   const ctx = canvas.getContext('2d');
 
-  ctx.drawImage(baseImg, 0, 0, W, H);
+  // Try Pollinations first
+  let baseImg = null;
+  try {
+    const enhanced = `${prompt}, cinematic, dramatic lighting, sports photography, 4k, high contrast`;
+    const seed = Math.floor(Math.random() * 100000);
+    const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(enhanced)}?width=${W}&height=${H}&nologo=true&seed=${seed}&referrer=football-ai-hub`;
+    const resp = await axios.get(url, { responseType: 'arraybuffer', timeout: 30000 });
+    baseImg = await loadImage(Buffer.from(resp.data));
+  } catch (e) {
+    console.warn('[thumbnail] Pollinations failed:', e.message, '- using fallback');
+    baseImg = null;
+  }
 
+  if (baseImg) {
+    ctx.drawImage(baseImg, 0, 0, W, H);
+  } else {
+    // Fallback: rich gradient background based on prompt hash
+    const hash = [...prompt].reduce((h, c) => ((h << 5) - h + c.charCodeAt(0)) | 0, 0);
+    const hue1 = Math.abs(hash) % 360;
+    const hue2 = (hue1 + 60) % 360;
+    const bg = ctx.createLinearGradient(0, 0, W, H);
+    bg.addColorStop(0, `hsl(${hue1}, 80%, 25%)`);
+    bg.addColorStop(0.5, `hsl(${(hue1 + 30) % 360}, 75%, 15%)`);
+    bg.addColorStop(1, `hsl(${hue2}, 85%, 10%)`);
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, W, H);
+    // Add geometric flourish
+    ctx.fillStyle = `hsla(${hue2}, 90%, 50%, 0.15)`;
+    for (let i = 0; i < 6; i++) {
+      const r = (Math.abs(hash + i * 1000) % (W / 3)) + 100;
+      ctx.beginPath();
+      ctx.arc((hash * (i + 1)) % W, (hash * (i + 2)) % H, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // Dark gradient overlay (bottom half) for text readability
   const grad = ctx.createLinearGradient(0, H * 0.45, 0, H);
   grad.addColorStop(0, 'rgba(0,0,0,0)');
   grad.addColorStop(1, 'rgba(0,0,0,0.78)');
@@ -29,9 +57,7 @@ async function renderThumbnail({ workDir, prompt, overlayText, composition }) {
   ctx.fillRect(0, 0, W, H);
 
   const text = (overlayText || '').toUpperCase();
-  if (text) {
-    drawWrappedBold(ctx, text, W, H);
-  }
+  if (text) drawWrappedBold(ctx, text, W, H);
 
   ctx.fillStyle = 'rgba(255,255,255,0.9)';
   ctx.font = 'bold 36px DejaVu Sans';
