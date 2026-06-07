@@ -1,35 +1,19 @@
-// TTS: Python edge-tts subprocess (primary) + gTTS HTTP (fallback) + silence (last resort).
-// Python edge-tts uses the official Microsoft endpoint reliably from cloud containers.
-const { spawnSync, spawn } = require('child_process');
+// TTS: Python edge-tts (Microsoft Neural voices) primary + gTTS HTTP fallback + silence last resort.
+const { spawnSync } = require('child_process');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 
-// Peter Drury-style: calm, confident British male
+// Voice map — male calm-confident British (Peter Drury feel) for English; male Latin Spanish.
 const VOICE_MAP = {
-  hype_male:        'en-GB-RyanNeural',     // was en-US-Guy; flipped to British calm for Peter Drury feel
+  hype_male:        'en-GB-RyanNeural',
   calm_analyst:     'en-GB-RyanNeural',
   female_energetic: 'en-US-AvaNeural',
   british_pundit:   'en-GB-RyanNeural',
   spanish_latin:    'es-MX-JorgeNeural',
   peter_drury:      'en-GB-RyanNeural',
 };
-const RATE_MAP = {
-  hype_male:        '-2%',   // calmer pace
-  calm_analyst:     '-2%',
-  female_energetic: '+10%',
-  british_pundit:   '-2%',
-  spanish_latin:    '+6%',
-  peter_drury:      '-4%',
-};
-const PITCH_MAP = {
-  hype_male:        '-2Hz',
-  calm_analyst:     '0Hz',
-  female_energetic: '+10Hz',
-  british_pundit:   '-2Hz',
-  spanish_latin:    '0Hz',
-  peter_drury:      '-3Hz',
-};
+
 const GTTS_LANG = {
   hype_male: 'en-gb', calm_analyst: 'en-gb', female_energetic: 'en',
   british_pundit: 'en-gb', spanish_latin: 'es', peter_drury: 'en-gb',
@@ -37,20 +21,11 @@ const GTTS_LANG = {
 
 function edgeTtsPython(text, voicePersona, outPath) {
   const voice = VOICE_MAP[voicePersona] || VOICE_MAP.british_pundit;
-  const rate  = RATE_MAP[voicePersona]  || '-2%';
-  const pitch = PITCH_MAP[voicePersona] || '-2Hz';
-
-  // python -m edge_tts --text "..." --voice ... --rate ... --pitch ... --write-media OUT
-  const r = spawnSync('python3', [
-    '-m', 'edge_tts',
-    '--text', text,
-    '--voice', voice,
-    '--rate', rate,
-    '--pitch', pitch,
-    '--write-media', outPath,
-  ], { stdio: 'pipe', maxBuffer: 50 * 1024 * 1024 });
+  // Run with minimal args — rate/pitch validation in newer edge-tts is strict, defaults are fine
+  const args = ['-m', 'edge_tts', '--text', text, '--voice', voice, '--write-media', outPath];
+  const r = spawnSync('python3', args, { stdio: 'pipe', maxBuffer: 50 * 1024 * 1024 });
   if (r.status !== 0) {
-    const err = r.stderr ? r.stderr.toString().slice(-600) : 'no stderr';
+    const err = r.stderr ? r.stderr.toString().slice(-800) : 'no stderr';
     throw new Error('python edge-tts exit ' + r.status + ': ' + err);
   }
   if (!fs.existsSync(outPath) || fs.statSync(outPath).size < 1024) {
