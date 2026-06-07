@@ -1,6 +1,6 @@
 FROM node:20-bookworm-slim
 
-# Install ffmpeg + node-canvas system deps + fonts
+# ffmpeg + node-canvas system deps + fonts + python3 for edge-tts
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     build-essential \
@@ -13,18 +13,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-liberation \
     fonts-noto-color-emoji \
     ca-certificates \
+    python3 \
+    python3-pip \
     && rm -rf /var/lib/apt/lists/*
+
+# Python edge-tts — Microsoft's neural voices via HTTP, more reliable than node msedge-tts
+RUN pip3 install --break-system-packages --no-cache-dir edge-tts==6.1.* || pip3 install --no-cache-dir edge-tts==6.1.*
 
 WORKDIR /app
 
-# Install deps first for layer caching
 COPY package.json ./
 RUN npm install --omit=dev --no-audit --no-fund
 
-# Copy app
 COPY src ./src
 
-# Ephemeral working dir for renders
 RUN mkdir -p /tmp/renders
 
 ENV NODE_ENV=production
