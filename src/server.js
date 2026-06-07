@@ -1,10 +1,6 @@
 // Football AI Hub - Video Service
-// Endpoints:
-//   GET  /health
-//   POST /render        -> renders a Short/LongForm MP4 + narration MP3
-//   POST /thumbnail     -> renders a 1080x1920 thumbnail JPG
-// Auth: optional X-API-Key (matches SERVICE_API_KEY env var)
-// All assets are uploaded to Cloudflare R2 and public URLs are returned.
+// Endpoints: GET /health, POST /render, POST /thumbnail
+// Now uses Pexels Videos (real b-roll clips) instead of static photos.
 
 const express = require('express');
 const fs = require('fs');
@@ -24,9 +20,8 @@ const app = express();
 app.use(express.json({ limit: '25mb' }));
 
 const PEXELS_KEY = process.env.PEXELS_API_KEY;
-const FALLBACK_QUERIES = ['football stadium', 'soccer match', 'sports celebration', 'football fans', 'soccer training'];
+const FALLBACK_VIDEO_QUERIES = ['football match', 'soccer stadium', 'sports celebration', 'football fans crowd', 'soccer training'];
 
-// Optional shared-secret auth
 app.use((req, res, next) => {
   if (req.path === '/health') return next();
   const key = process.env.SERVICE_API_KEY;
@@ -39,7 +34,7 @@ app.get('/health', (req, res) => res.json({ ok: true, ts: new Date().toISOString
 
 function extractKeywords(prompt) {
   if (!prompt) return null;
-  const stop = new Set(['with', 'from', 'into', 'this', 'that', 'than', 'over', 'show', 'shows', 'their', 'each', 'side', 'left', 'right', 'design', 'style', 'color', 'colour', 'bold', 'dark', 'light', 'background', 'image', 'photo', 'shot', 'view', 'scene', 'wide', 'close']);
+  const stop = new Set(['with','from','into','this','that','than','over','show','shows','their','each','side','left','right','design','style','color','colour','bold','dark','light','background','image','photo','shot','view','scene','wide','close','animated','animation','overlay','text','floating','geometric']);
   const words = prompt.toLowerCase()
     .replace(/[^a-z0-9 ]/g, ' ')
     .split(/\s+/)
@@ -48,39 +43,63 @@ function extractKeywords(prompt) {
   return words.length ? words.join(' ') + ' football' : null;
 }
 
-async function pexelsSearch(query, orientation) {
+// Pexels Videos search — returns {url, duration} or null
+async function pexelsVideoSearch(query, orientation) {
   if (!PEXELS_KEY) return null;
   const o = orientation || 'portrait';
-  const url = `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&per_page=15&orientation=${o}`;
+  const url = `https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&per_page=15&orientation=${o}`;
   try {
-    const r = await axios.get(url, { headers: { Authorization: PEXELS_KEY }, timeout: 15000 });
-    const photos = r.data.photos || [];
-    if (photos.length === 0) return null;
-    const pick = photos[Math.floor(Math.random() * photos.length)];
-    return pick.src.large2x || pick.src.large || pick.src.original;
+    const r = await axios.get(url, { headers: { Authorization: PEXELS_KEY }, timeout: 20000 });
+    const videos = r.data.videos || [];
+    if (videos.length === 0) return null;
+    // Random pick from top 10
+    const pick = videos[Math.floor(Math.random() * Math.min(videos.length, 10))];
+    // Find best MP4 file matching orientation
+    const wantPortrait = o === 'portrait';
+    const files = (pick.video_files || []).filter(f => (f.file_type || '').includes('mp4'));
+    if (!files.length) return null;
+    const matching = files.filter(f => wantPortrait ? f.height > f.width : f.width > f.height);
+    const pool = matching.length ? matching : files;
+    // Prefer ~720p HD (smaller download, still good quality on Shorts)
+    const sorted = pool.slice().sort((a, b) => {
+      const aDist = Math.abs((wantPortrait ? a.height : a.width) - 720);
+      const bDist = Math.abs((wantPortrait ? b.height : b.width) - 720);
+      return aDist - bDist;
+    });
+    return { url: sorted[0].link, duration: pick.duration || 10 };
   } catch (e) {
-    console.warn('[pexels] search failed for', query, ':', e.message);
+    console.warn('[pexels-video] search failed for', query, ':', e.message);
     return null;
   }
 }
 
-async function visualUrlForPrompt(prompt, orientation) {
-  // Try keyword-extracted prompt, then fallback queries
-  const queries = [extractKeywords(prompt)].filter(Boolean).concat(FALLBACK_QUERIES);
+async function videoUrlForPrompt(prompt, orientation, broll_queries) {
+  // Try keyword-derived prompt, then broll_queries, then fallback queries
+  const queries = [extractKeywords(prompt)]
+    .concat(broll_queries || [])
+    .concat(FALLBACK_VIDEO_QUERIES)
+    .filter(Boolean);
   for (const q of queries) {
-    const url = await pexelsSearch(q, orientation);
-    if (url) return url;
+    const v = await pexelsVideoSearch(q, orientation);
+    if (v) return v;
   }
   return null;
 }
 
-/**
- * POST /render
- * Body: {
- *   idea_id, composition, script: {hook, body[], cta, captions[], visual_prompts[], voice_persona, total_duration_seconds, ...},
- *   visuals?: [{t, url}], voice_persona?: string,
- * }
- */
+// Photos search — kept for thumbnail base image
+async function pexelsPhotoSearch(query, orientation) {
+  if (!PEXELS_KEY) return null;
+  const o = orientation || 'portrait';
+  const url = `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&per_page=10&orientation=${o}`;
+  try {
+    const r = await axios.get(url, { headers: { Authorization: PEXELS_KEY }, timeout: 15000 });
+    const photos = r.data.photos || [];
+    if (!photos.length) return null;
+    const p = photos[Math.floor(Math.random() * photos.length)];
+    return p.src.large2x || p.src.large || p.src.original;
+  } catch (_) { return null; }
+}
+
 app.post('/render', async (req, res) => {
   const t0 = Date.now();
   const { idea_id, composition = 'Short', script } = req.body || {};
@@ -96,12 +115,12 @@ app.post('/render', async (req, res) => {
     ].filter(Boolean).join(' ');
     if (!narrationText.trim()) throw new Error('Empty narration text');
 
-    // 2) TTS via Edge
-    const voice = req.body.voice_persona || script.voice_persona || 'hype_male';
+    // 2) TTS
+    const voice = req.body.voice_persona || script.voice_persona || 'british_pundit';
     const narrationPath = path.join(workDir, 'narration.mp3');
     await synthesize(narrationText, voice, narrationPath);
 
-    // 3) Visuals: caller-supplied URLs, else Pexels search per visual_prompt
+    // 3) Visuals: caller-supplied URLs, else Pexels Video search per visual_prompt
     const isShort = composition !== 'LongForm';
     const orientation = isShort ? 'portrait' : 'landscape';
     let visualUrls;
@@ -111,25 +130,28 @@ app.post('/render', async (req, res) => {
       const prompts = script.visual_prompts || [];
       visualUrls = [];
       for (const vp of prompts) {
-        const url = await visualUrlForPrompt(vp.prompt, orientation);
-        if (url) visualUrls.push({ t: vp.t, url });
+        const v = await videoUrlForPrompt(vp.prompt, orientation, script.broll_queries);
+        if (v) visualUrls.push({ t: vp.t, url: v.url, sourceDuration: v.duration });
       }
-      // If we have prompts but Pexels returned nothing, last-ditch fallback
       if (visualUrls.length === 0) {
         for (let i = 0; i < Math.max(prompts.length, 3); i++) {
-          const fb = FALLBACK_QUERIES[i % FALLBACK_QUERIES.length];
-          const url = await pexelsSearch(fb, orientation);
-          if (url) visualUrls.push({ t: i * 5, url });
+          const fb = FALLBACK_VIDEO_QUERIES[i % FALLBACK_VIDEO_QUERIES.length];
+          const v = await pexelsVideoSearch(fb, orientation);
+          if (v) visualUrls.push({ t: i * 5, url: v.url, sourceDuration: v.duration });
         }
       }
     }
-    if (visualUrls.length === 0) throw new Error('No visuals available to render (Pexels returned 0 results)');
+    if (visualUrls.length === 0) throw new Error('No video clips available from Pexels');
 
     visualUrls.sort((a, b) => (a.t || 0) - (b.t || 0));
 
     const localPaths = await downloadMany(visualUrls.map(v => v.url), workDir, 'vis');
-    if (localPaths.length === 0) throw new Error('Failed to download any visuals');
-    const visuals = localPaths.map((local, i) => ({ local, t: visualUrls[i] ? visualUrls[i].t : i * 5 }));
+    if (localPaths.length === 0) throw new Error('Failed to download any video clips');
+    const visuals = localPaths.map((local, i) => ({
+      local,
+      t: visualUrls[i] ? visualUrls[i].t : i * 5,
+      sourceDuration: visualUrls[i] ? visualUrls[i].sourceDuration : null,
+    }));
 
     // 4) Captions -> SRT
     const totalDuration = script.total_duration_seconds || (composition === 'LongForm' ? 600 : 45);
@@ -159,10 +181,6 @@ app.post('/render', async (req, res) => {
   }
 });
 
-/**
- * POST /thumbnail
- * Body: { idea_id, prompt, overlay_text, composition? }
- */
 app.post('/thumbnail', async (req, res) => {
   const t0 = Date.now();
   const { idea_id, prompt, overlay_text, composition = 'Short' } = req.body || {};
@@ -186,6 +204,4 @@ app.post('/thumbnail', async (req, res) => {
 });
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-app.listen(PORT, () => {
-  console.log(`[video-service] listening on :${PORT}`);
-});
+app.listen(PORT, () => console.log(`[video-service] listening on :${PORT}`));
