@@ -1,5 +1,6 @@
-// FFmpeg slideshow renderer — memory-light for trial-tier Railway containers.
-// No zoompan, ultrafast preset, lower fps, single-threaded encode.
+// FFmpeg slideshow renderer — now using REAL VIDEO CLIPS from Pexels (not images).
+// Each input is an MP4 b-roll clip; we trim each to its segment duration.
+// Memory-light for trial-tier Railway container.
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -15,12 +16,16 @@ async function renderVideo({
 
   const segs = computeSegments(visuals, durationSec);
 
+  // Build filter graph: each input is a video; trim+scale+crop+fps it, then concat
   const lines = [];
   segs.forEach((s, i) => {
-    // Just scale/crop/pad to canvas, no zoompan (saves memory)
+    const dur = s.duration.toFixed(2);
+    // setpts=PTS-STARTPTS resets timestamps so concat works smoothly
+    // If source clip is shorter than segment, loop it by setting -stream_loop on input
     lines.push(
-      `[${i}:v]scale=${W}:${H}:force_original_aspect_ratio=increase,` +
-      `crop=${W}:${H},setsar=1,format=yuv420p,fps=${FPS}[v${i}]`
+      `[${i}:v]trim=duration=${dur},setpts=PTS-STARTPTS,` +
+      `scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},` +
+      `setsar=1,fps=${FPS},format=yuv420p[v${i}]`
     );
   });
   const concatIn = segs.map((_, i) => `[v${i}]`).join('');
@@ -40,7 +45,8 @@ async function renderVideo({
 
   const args = ['-hide_banner', '-loglevel', 'error'];
   segs.forEach(s => {
-    args.push('-loop', '1', '-t', s.duration.toFixed(2), '-framerate', String(FPS), '-i', s.local);
+    // -stream_loop -1 lets a short clip loop until trim's duration is hit
+    args.push('-stream_loop', '-1', '-i', s.local);
   });
   args.push('-i', narrationPath);
   args.push('-filter_complex_script', filterFile);
@@ -53,12 +59,11 @@ async function renderVideo({
     '-crf', '28',
     '-pix_fmt', 'yuv420p',
     '-threads', '1',
-    '-x264opts', 'no-scenecut',
     '-c:a', 'aac', '-b:a', '96k', '-ac', '1',
     '-movflags', '+faststart', '-shortest', '-y', outPath
   );
 
-  console.log('[ffmpeg] start render segs=' + segs.length + ' ' + W + 'x' + H + ' fps=' + FPS + ' dur=' + durationSec);
+  console.log('[ffmpeg] render with VIDEO clips: segs=' + segs.length + ' ' + W + 'x' + H + ' fps=' + FPS + ' dur=' + durationSec);
 
   return new Promise((resolve, reject) => {
     const proc = spawn('ffmpeg', args);
