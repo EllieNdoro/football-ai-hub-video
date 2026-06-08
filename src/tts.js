@@ -1,36 +1,38 @@
-// TTS: Python edge-tts (Microsoft Neural voices) primary + gTTS HTTP fallback + silence last resort.
-const { spawnSync } = require('child_process');
+// TTS: Piper (local neural TTS, male British) primary + gTTS fallback + silence last resort.
+const { spawn, spawnSync } = require('child_process');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 
-// Voice map — male calm-confident British (Peter Drury feel) for English; male Latin Spanish.
-const VOICE_MAP = {
-  hype_male:        'en-GB-RyanNeural',
-  calm_analyst:     'en-GB-RyanNeural',
-  female_energetic: 'en-US-AvaNeural',
-  british_pundit:   'en-GB-RyanNeural',
-  spanish_latin:    'es-MX-JorgeNeural',
-  peter_drury:      'en-GB-RyanNeural',
-};
-
+const PIPER_VOICE = process.env.PIPER_VOICE || '/opt/piper-voices/en_GB-alan-medium.onnx';
 const GTTS_LANG = {
   hype_male: 'en-gb', calm_analyst: 'en-gb', female_energetic: 'en',
   british_pundit: 'en-gb', spanish_latin: 'es', peter_drury: 'en-gb',
 };
 
-function edgeTtsPython(text, voicePersona, outPath) {
-  const voice = VOICE_MAP[voicePersona] || VOICE_MAP.british_pundit;
-  // Run with minimal args — rate/pitch validation in newer edge-tts is strict, defaults are fine
-  const args = ['-m', 'edge_tts', '--text', text, '--voice', voice, '--write-media', outPath];
-  const r = spawnSync('python3', args, { stdio: 'pipe', maxBuffer: 50 * 1024 * 1024 });
+function piperSynthesize(text, outPath) {
+  // Piper writes WAV to stdout; we pipe through ffmpeg to MP3
+  const wavPath = outPath.replace(/\.mp3$/, '.wav');
+  // Pass text via stdin, write wav to file
+  const r = spawnSync('piper', ['--model', PIPER_VOICE, '--output_file', wavPath], {
+    input: text,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    encoding: 'utf8',
+    timeout: 90000,
+  });
   if (r.status !== 0) {
-    const err = r.stderr ? r.stderr.toString().slice(-800) : 'no stderr';
-    throw new Error('python edge-tts exit ' + r.status + ': ' + err);
+    const err = r.stderr ? String(r.stderr).slice(-600) : 'no stderr';
+    throw new Error('piper exit ' + r.status + ': ' + err);
   }
-  if (!fs.existsSync(outPath) || fs.statSync(outPath).size < 1024) {
-    throw new Error('python edge-tts produced empty file');
+  if (!fs.existsSync(wavPath) || fs.statSync(wavPath).size < 1024) {
+    throw new Error('piper produced empty wav');
   }
+  // Convert WAV -> MP3
+  const ff = spawnSync('ffmpeg', ['-y', '-i', wavPath, '-c:a', 'libmp3lame', '-b:a', '128k', '-ac', '1', outPath], { stdio: 'pipe' });
+  if (ff.status !== 0) {
+    throw new Error('ffmpeg wav->mp3 failed: ' + (ff.stderr ? String(ff.stderr).slice(-400) : ''));
+  }
+  try { fs.unlinkSync(wavPath); } catch (_) {}
   return outPath;
 }
 
@@ -89,11 +91,11 @@ async function gttsSynthesize(text, voicePersona, outPath) {
 
 async function synthesize(text, voicePersona, outPath) {
   try {
-    edgeTtsPython(text, voicePersona, outPath);
-    console.log('[tts] python edge-tts ok, voice=' + (VOICE_MAP[voicePersona] || 'default'));
+    piperSynthesize(text, outPath);
+    console.log('[tts] piper ok, voice=' + PIPER_VOICE);
     return outPath;
   } catch (e) {
-    console.warn('[tts] python edge-tts failed:', e.message);
+    console.warn('[tts] piper failed:', e.message);
   }
   try {
     await gttsSynthesize(text, voicePersona, outPath);
@@ -107,4 +109,4 @@ async function synthesize(text, voicePersona, outPath) {
   }
 }
 
-module.exports = { synthesize, VOICE_MAP };
+module.exports = { synthesize };
